@@ -87,14 +87,13 @@ def main(args):
 
     ingr_vocab_size = dataset.get_ingrs_vocab_size()
     tool_vocab_size = dataset.get_tools_vocab_size()
-    action_vocab_size = dataset.action_vocab_size()
+    action_vocab_size = dataset.get_actions_vocab_size()
     instrs_vocab_size = dataset.get_instrs_vocab_size()
 
     args.numgens = 1
 
     # Build the model
     model = get_model(args, ingr_vocab_size, tool_vocab_size, action_vocab_size, instrs_vocab_size)
-    print(model)
     model_path = os.path.join(args.save_dir, args.project_name, args.model_name, 'checkpoints', 'modelbest.ckpt')
 
     # overwrite flags for inference
@@ -106,28 +105,40 @@ def main(args):
 
     model.eval()
     model = model.to(device)
-    results_dict = {'recipes': {}, 'ingrs': {}, 'ingr_iou': {}}
+    results_dict = {'ingredient_recipes': {}, 'tool_recipes': {}, 'action_recipes': {},
+                    'ingredient': {}, 'ingredient_iou': {},
+                    'tool': {}, 'tool_iou': {},
+                    'action': {}, 'action_iou': {}}
     captions = {}
-    iou = []
-    error_types = {'tp_i': 0, 'fp_i': 0, 'fn_i': 0, 'tn_i': 0, 'tp_all': 0, 'fp_all': 0, 'fn_all': 0}
+    iou = {'ingredient':[], 'tool':[], 'action': []}
+    error_types = {'tp_ingredient': 0, 'fp_ingredient': 0, 'fn_ingredient': 0, 'tn_ingredient': 0,
+                           'tp_tool': 0, 'fp_tool': 0, 'fn_tool': 0, 'tn_tool': 0,
+                           'tp_action': 0, 'fp_action': 0, 'fn_action': 0, 'tn_action': 0,
+                           'tp_all': 0, 'fp_all': 0, 'fn_all': 0, 'tn_all': 0}
     perplexity_list = []
     n_rep, th = 0, 0.3
 
-    for i, (img_inputs, true_caps_batch, ingr_gt, imgid, impath) in tqdm(enumerate(data_loader)):
+    for i, (img_inputs, true_caps_batch, ingr_gt, tool_gt, action_gt, imgid, impath) in tqdm(enumerate(data_loader), total=len(data_loader)):
 
         ingr_gt = ingr_gt.to(device)
+        tool_gt = tool_gt.to(device)
+        action_gt = action_gt.to(device)
+
         true_caps_batch = true_caps_batch.to(device)
 
         true_caps_shift = true_caps_batch.clone()[:, 1:].contiguous()
         img_inputs = img_inputs.to(device)
 
         true_ingrs = ingr_gt if args.use_true_ingrs else None
+        true_tools = tool_gt if args.use_true_ingrs else None
+        true_actions = action_gt if args.use_true_ingrs else None
+
         for gens in range(args.numgens):
             with torch.no_grad():
 
                 if args.get_perplexity:
 
-                    losses = model(img_inputs, true_caps_batch, ingr_gt, keep_cnn_gradients=False)
+                    losses = model(img_inputs, true_caps_batch, ingr_gt, tool_gt, action_gt, keep_cnn_gradients=False)
                     recipe_loss = losses['recipe_loss']
                     recipe_loss = recipe_loss.view(true_caps_shift.size())
                     non_pad_mask = true_caps_shift.ne(instrs_vocab_size - 1).float()
@@ -138,47 +149,64 @@ def main(args):
                     perplexity_list.extend(perplexity)
 
                 else:
+                    outputs = {}
+                    for entity_type in ['ingredient', 'tool', 'action']:
+                        entity_encoder = {'ingredient': model.ingredient_encoder,
+                                          'tool': model.tool_encoder,
+                                          'action': model.action_encoder}[entity_type]
+                        entity_decoder = {'ingredient': model.ingredient_decoder,
+                                          'tool': model.tool_decoder,
+                                          'action': model.action_decoder}[entity_type]
+                        outputs = model.sample(entity_type, entity_encoder, entity_decoder, img_inputs, outputs, greedy=True)
 
-                    outputs = model.sample(img_inputs, args.greedy, args.temperature, args.beam, true_ingrs)
+                    for entity_type in ['ingredient', 'tool', 'action']:
+                        if not args.recipe_only:
+                                fake_entities = outputs[f'{entity_type}_ids']
+                                entity_vocab_size = {'ingredient': ingr_vocab_size,
+                                                    'tool': tool_vocab_size,
+                                                    'action': action_vocab_size}[entity_type]
+                                entity_gt = {'ingredient': ingr_gt,
+                                            'tool': tool_gt,
+                                            'action': action_gt}[entity_type]
 
-                    if not args.recipe_only:
-                        fake_ingrs = outputs['ingr_ids']
-                        pred_one_hot = label2onehot(fake_ingrs, ingr_vocab_size - 1)
-                        target_one_hot = label2onehot(ingr_gt, ingr_vocab_size - 1)
-                        iou_item = torch.mean(softIoU(pred_one_hot, target_one_hot)).item()
-                        iou.append(iou_item)
+                                pred_one_hot = label2onehot(fake_entities, entity_vocab_size - 1)
+                                target_one_hot = label2onehot(entity_gt, entity_vocab_size - 1)
+                                iou_item = torch.mean(softIoU(pred_one_hot, target_one_hot)).item()
+                                iou[entity_type].append(iou_item)
 
-                        update_error_types(error_types, pred_one_hot, target_one_hot)
+                                update_error_types(error_types, pred_one_hot, target_one_hot, entity_type)
 
-                        fake_ingrs = fake_ingrs.detach().cpu().numpy()
+                                fake_entities = fake_entities.detach().cpu().numpy()
 
-                        for ingr_idx, fake_ingr in enumerate(fake_ingrs):
+                                for entity_idx, fake_entity in enumerate(fake_entities):
 
-                            iou_item = softIoU(pred_one_hot[ingr_idx].unsqueeze(0),
-                                               target_one_hot[ingr_idx].unsqueeze(0)).item()
-                            results_dict['ingrs'][imgid[ingr_idx]] = []
-                            results_dict['ingrs'][imgid[ingr_idx]].append(fake_ingr)
-                            results_dict['ingr_iou'][imgid[ingr_idx]] = iou_item
+                                    iou_item = softIoU(pred_one_hot[entity_idx].unsqueeze(0),
+                                                    target_one_hot[entity_idx].unsqueeze(0)).item()
+                                    results_dict[entity_type][imgid[entity_idx]] = []
+                                    results_dict[entity_type][imgid[entity_idx]].append(fake_entity)
+                                    results_dict[f'{entity_type}_iou'][imgid[entity_idx]] = iou_item
 
-                    if not args.ingrs_only:
-                        sampled_ids_batch = outputs['recipe_ids']
-                        sampled_ids_batch = sampled_ids_batch.cpu().detach().numpy()
+                        if not args.ingrs_only:
+                            sampled_ids_batch = outputs[f'{entity_type}_recipe_ids']
+                            sampled_ids_batch = sampled_ids_batch.cpu().detach().numpy()
 
-                        for j, sampled_ids in enumerate(sampled_ids_batch):
-                            score = compute_score(sampled_ids)
-                            if score < th:
-                                n_rep += 1
-                            if imgid[j] not in captions.keys():
-                                results_dict['recipes'][imgid[j]] = []
-                                results_dict['recipes'][imgid[j]].append(sampled_ids)
+                            for j, sampled_ids in enumerate(sampled_ids_batch):
+                                score = compute_score(sampled_ids)
+                                if score < th:
+                                    n_rep += 1
+                                if imgid[j] not in captions.keys():
+                                    results_dict[f'{entity_type}_recipes'][imgid[j]] = []
+                                    results_dict[f'{entity_type}_recipes'][imgid[j]].append(sampled_ids)
     if args.get_perplexity:
         print (len(perplexity_list))
         print (np.mean(perplexity_list))
     else:
 
         if not args.recipe_only:
-            ret_metrics = {'accuracy': [], 'f1': [], 'jaccard': [], 'f1_ingredients': []}
-            compute_metrics(ret_metrics, error_types, ['accuracy', 'f1', 'jaccard', 'f1_ingredients'],
+            ret_metrics = {'accuracy': [], 'f1': [], 'jaccard': [],
+                           'f1_ingredient': [], 'f1_tool':[], 'f1_action': [],
+                           'ingredient_accuracy':[], 'tool_accuracy': [], 'action_accuracy': []}
+            compute_metrics(ret_metrics, error_types, ['accuracy', 'f1', 'jaccard', 'f1_ingredient', 'f1_tool', 'f1_action'],
                             eps=1e-10,
                             weights=None)
 
