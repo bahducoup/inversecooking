@@ -66,6 +66,9 @@ def compute_metrics(ret_metrics, error_types, metric_names, eps=1e-10, weights=N
     if 'accuracy' in metric_names:
         ret_metrics['accuracy'].append(np.mean((error_types['tp_all'] + error_types['tn_all']) / (error_types['tp_all'] + error_types['fp_all'] + error_types['fn_all'] + error_types['tn_all'])))
 
+        for entity_type in ['ingredient', 'tool', 'action']:
+            ret_metrics[f'{entity_type}_accuracy'].append(np.mean((error_types[f'tp_{entity_type}'] + error_types[f'tn_{entity_type}']) / (error_types[f'tp_{entity_type}'] + error_types[f'fp_{entity_type}'] + error_types[f'fn_{entity_type}'] + error_types[f'tn_{entity_type}'])))
+            
     if 'f1' in metric_names:
         for entity_type in ['ingredient', 'tool', 'action']:
             pre = error_types[f'tp_{entity_type}'] / (error_types[f'tp_{entity_type}'] + error_types[f'fp_{entity_type}'] + eps)

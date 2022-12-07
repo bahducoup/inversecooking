@@ -86,12 +86,15 @@ def main(args):
                                       use_lmdb=args.use_lmdb, suff=args.suff)
 
     ingr_vocab_size = dataset.get_ingrs_vocab_size()
+    tool_vocab_size = dataset.get_tools_vocab_size()
+    action_vocab_size = dataset.action_vocab_size()
     instrs_vocab_size = dataset.get_instrs_vocab_size()
 
     args.numgens = 1
 
     # Build the model
-    model = get_model(args, ingr_vocab_size, instrs_vocab_size)
+    model = get_model(args, ingr_vocab_size, tool_vocab_size, action_vocab_size, instrs_vocab_size)
+    print(model)
     model_path = os.path.join(args.save_dir, args.project_name, args.model_name, 'checkpoints', 'modelbest.ckpt')
 
     # overwrite flags for inference
